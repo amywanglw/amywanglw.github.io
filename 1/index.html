@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Project 1 &middot; Images of the Russian Empire</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<div class="wrap">
+
+<nav class="crumbs">
+  <a href="../index.html">Home</a> <span>/</span>
+  <a href="../cs180/index.html">CS 180</a> <span>/</span>
+  <span class="here">Project 1</span>
+</nav>
+
+<header>
+  <p class="eyebrow">CS 180 &middot; Fall 2026 &middot; Project 1</p>
+  <h1>Images of the Russian Empire</h1>
+  <p class="sub">Colorizing the Prokudin-Gorskii photo collection</p>
+  <p class="byline">Amy Wang</p>
+</header>
+
+<h2 id="overview">Overview</h2>
+<p>For this project I worked with the Prokudin-Gorskii collection. Around 1907 he travelled across the Russian Empire taking photographs in a pretty clever way: he shot the same scene three times in a row, each time through a different color filter, and recorded all three exposures onto one tall glass plate.</p>
+<p>My goal was to turn those scans back into a single color photo. I split each scan into thirds to get the blue, green and red channels and stack them into one RGB image. The catch is that the camera shifted slightly between each exposure, so stacking the channels as they are gives you a blurry, color-fringed mess. So to accurately recreate the images, I had to create an algorithm that would align the images together properly and automatically give a finished aligned colored image.</p>
+
+<h2 id="metric">Matching metric</h2>
+<p>First, I want to talk about the image matching metric that I chose. I used <code>np.roll</code> to move the images by a certain x and y and then scored itagainst the reference image by using the sum of squared differences. 
+  Since we wanted the images to be as close to each other as possible, and idealy right on top of each other, the lowest score is taken.</p>
+<p>Additionally, I want to mention that the score is computed on a cropped region rather than the whole frame. As I was running my code on the example images, I realized that some of the scans have thick
+plate borders that are different in contrast than the actual photograph. For example, for on monastery.jpg, the outer 10% of the frame
+holds about a third of the pixels but also 80% of the total squared error. Cropping makes this image turn out a lot more aligned.</p>
+
+<h2 id="single-scale">Single-scale alignment</h2>
+<p>Now, to talk about the first part of this project: creating a single-scale alignment algorithm. Since 
+  we only need to use this algorithm on the smaller .jpg files, I run an exhaustive search over [&minus;15,&nbsp;15] in both cardinal directions and compare my previously mentioned matching metric to find the ideal coordinates.</p>
+
+<div class="pair">
+<figure class="shot">
+  <a href="media/single_cathedral.jpg"><img src="media/single_cathedral.jpg" alt="cathedral, single-scale" loading="lazy"></a>
+  <figcaption>
+    <span class="figname">cathedral</span>
+    <span class="offs">G&nbsp;(5,&nbsp;2) &nbsp;&middot;&nbsp; R&nbsp;(12,&nbsp;3)</span>
+  </figcaption>
+</figure>
+<figure class="shot">
+  <a href="media/single_monastery.jpg"><img src="media/single_monastery.jpg" alt="monastery, single-scale" loading="lazy"></a>
+  <figcaption>
+    <span class="figname">monastery</span>
+    <span class="offs">G&nbsp;(&minus;3,&nbsp;2) &nbsp;&middot;&nbsp; R&nbsp;(3,&nbsp;2)</span>
+  </figcaption>
+</figure>
+<figure class="shot">
+  <a href="media/single_tobolsk.jpg"><img src="media/single_tobolsk.jpg" alt="tobolsk, single-scale" loading="lazy"></a>
+  <figcaption>
+    <span class="figname">tobolsk</span>
+    <span class="offs">G&nbsp;(3,&nbsp;3) &nbsp;&middot;&nbsp; R&nbsp;(6,&nbsp;3)</span>
+  </figcaption>
+</figure>
+</div>
+
+<div class="tablewrap">
+<table>
+  <thead>
+    <tr><th>Image</th><th>Green offset</th><th>Red offset</th><th>Search window</th><th>Candidates</th></tr>
+  </thead>
+  <tbody>
+    <tr><td class="nm">cathedral</td><td class="num">(5,&nbsp;2)</td><td class="num">(12,&nbsp;3)</td><td class="num dim">&plusmn;15</td><td class="num dim">961</td></tr>
+    <tr><td class="nm">monastery</td><td class="num">(&minus;3,&nbsp;2)</td><td class="num">(3,&nbsp;2)</td><td class="num dim">&plusmn;15</td><td class="num dim">961</td></tr>
+    <tr><td class="nm">tobolsk</td><td class="num">(3,&nbsp;3)</td><td class="num">(6,&nbsp;3)</td><td class="num dim">&plusmn;15</td><td class="num dim">961</td></tr>
+  </tbody>
+</table>
+</div>
+<p class="caption">Offsets are (rows,&nbsp;columns) &mdash; the arguments passed to
+<code>np.roll</code> along axes 0 and 1.</p>
+
+<p>This part went pretty smoothly, the only issue was that the monastery.jpg, as already mentioned above. In order to get those images to line up properly, I had to implement cropping of the borders so that
+  the algorithm was able to more accurately calculate the best coordinate to shift the image to. This entire section is commented out in the main code and goes from line 66 to 80. In order to run it, uncomment 
+  lines 66-80 and comment lines 63-64.
+</p>
+
+<h2 id="pyramid">Image pyramid</h2>
+<p>Previously, the naive looping algorithm was able to run across the smaller files in a decent amount of time. However, the <code>.tif</code> plates are much larger than the <code>.jpg</code> plates and would be unreasonable to run the naive algorithm on. </p>
+<p>Instead, <code>align</code> recursively halves the image until the smaller side drops below 100 pixels, searches exhaustively using the naive algorithm at that coarsest level, and then on the way back up doubles the estimate it received and searches a 3x3 window around it. 
+  A displacement that was accurate at half resolution can only be off by about a pixel once doubled, so searching around in a radius of 1 is enough above the base level in order to get the best coordinate estimates.</p>
+<p>The recursion returns a displacement rather than an aligned image, so that each level has something to double. The rolling happens once, at the end.</p>
+
+<h2 id="offsets">Computed offsets</h2>
+<div class="tablewrap">
+<table>
+  <thead>
+    <tr><th>Image</th><th>Source</th><th>Green offset</th><th>Red offset</th><th>Channel size</th><th>Time</th></tr>
+  </thead>
+  <tbody>
+    <tr><td class="nm">cathedral</td><td class="src">cathedral.jpg</td><td class="num">(3,&nbsp;2)</td><td class="num">(11,&nbsp;3)</td><td class="num dim">390&times;341</td><td class="num dim">0.1s</td></tr>
+    <tr><td class="nm">church</td><td class="src">church.tif</td><td class="num">(25,&nbsp;4)</td><td class="num">(58,&nbsp;&minus;4)</td><td class="num dim">3634&times;3202</td><td class="num dim">0.7s</td></tr>
+    <tr><td class="nm">emir <span class="warn">†</span></td><td class="src">emir.tif</td><td class="num">(49,&nbsp;24)</td><td class="num">(17,&nbsp;&minus;825)</td><td class="num dim">3702&times;3209</td><td class="num dim">0.5s</td></tr>
+    <tr><td class="nm">harvesters</td><td class="src">harvesters.tif</td><td class="num">(59,&nbsp;16)</td><td class="num">(123,&nbsp;13)</td><td class="num dim">3683&times;3218</td><td class="num dim">0.7s</td></tr>
+    <tr><td class="nm">icon</td><td class="src">icon.tif</td><td class="num">(41,&nbsp;17)</td><td class="num">(89,&nbsp;23)</td><td class="num dim">3741&times;3244</td><td class="num dim">0.8s</td></tr>
+    <tr><td class="nm">ilemselga</td><td class="src">ilemselga.tif</td><td class="num">(40,&nbsp;7)</td><td class="num">(130,&nbsp;11)</td><td class="num dim">3800&times;3270</td><td class="num dim">0.8s</td></tr>
+    <tr><td class="nm">melons</td><td class="src">melons.tif</td><td class="num">(81,&nbsp;10)</td><td class="num">(178,&nbsp;13)</td><td class="num dim">3770&times;3241</td><td class="num dim">0.6s</td></tr>
+    <tr><td class="nm">monastery</td><td class="src">monastery.jpg</td><td class="num">(&minus;3,&nbsp;2)</td><td class="num">(3,&nbsp;2)</td><td class="num dim">391&times;341</td><td class="num dim">0.0s</td></tr>
+    <tr><td class="nm">religous_painting</td><td class="src">religous_painting.tif</td><td class="num">(27,&nbsp;3)</td><td class="num">(68,&nbsp;7)</td><td class="num dim">3742&times;3193</td><td class="num dim">0.7s</td></tr>
+    <tr><td class="nm">self_portrait</td><td class="src">self_portrait.tif</td><td class="num">(78,&nbsp;29)</td><td class="num">(176,&nbsp;37)</td><td class="num dim">3810&times;3251</td><td class="num dim">1.0s</td></tr>
+    <tr><td class="nm">siren</td><td class="src">siren.tif</td><td class="num">(49,&nbsp;&minus;6)</td><td class="num">(95,&nbsp;&minus;25)</td><td class="num dim">3817&times;3250</td><td class="num dim">0.7s</td></tr>
+    <tr><td class="nm">three_generations</td><td class="src">three_generations.tif</td><td class="num">(53,&nbsp;14)</td><td class="num">(112,&nbsp;11)</td><td class="num dim">3714&times;3209</td><td class="num dim">0.5s</td></tr>
+    <tr><td class="nm">tobolsk</td><td class="src">tobolsk.jpg</td><td class="num">(3,&nbsp;3)</td><td class="num">(6,&nbsp;3)</td><td class="num dim">396&times;341</td><td class="num dim">0.0s</td></tr>
+    <tr><td class="nm">wharf</td><td class="src">wharf.tif</td><td class="num">(15,&nbsp;&minus;7)</td><td class="num">(82,&nbsp;&minus;16)</td><td class="num dim">3761&times;3244</td><td class="num dim">0.6s</td></tr>
+  </tbody>
+</table>
+</div>
+<p class="caption"><span class="warn">&#8224;</span> See <a href="#failure">Known issue</a>.</p>
+
+<h2 id="results">Results</h2>
+<p class="lede">Click any image for the full-size file.</p>
+<div class="gallery two">
+<figure class="shot" id="img-cathedral">
+  <a href="media/cathedral.jpg"><img src="media/cathedral.jpg" alt="cathedral, colorized" loading="lazy"></a>
+  <figcaption>
+    <span class="figname">cathedral</span>
+    <span class="offs">G&nbsp;(3,&nbsp;2) &nbsp;&middot;&nbsp; R&nbsp;(11,&nbsp;3)</span>
+  </figcaption>
+</figure>
+<figure class="shot" id="img-church">
+  <a href="media/church.jpg"><img src="media/church.jpg" alt="church, colorized" loading="lazy"></a>
+  <figcaption>
+    <span class="figname">church</span>
+    <span class="offs">G&nbsp;(25,&nbsp;4) &nbsp;&middot;&nbsp; R&nbsp;(58,&nbsp;&minus;4)</span>
+  </figcaption>
+</figure>
+<figure class="shot" id="img-emir">
+  <a href="media/emir.jpg"><img src="media/emir.jpg" alt="emir, colorized" loading="lazy"></a>
+  <figcaption>
+    <span class="figname">emir</span>
+    <span class="offs">G&nbsp;(49,&nbsp;24) &nbsp;&middot;&nbsp; R&nbsp;(17,&nbsp;&minus;825)</span>
+  </figcaption>
+  <p class="fignote">See <a href="#failure">Known issue</a>.</p>
+</figure>
+<figure class="shot" id="img-harvesters">
+  <a href="media/harvesters.jpg"><img src="media/harvesters.jpg" alt="harvesters, colorized" loading="lazy"></a>
+  <figcaption>
+    <span class="figname">harvesters</span>
+    <span class="offs">G&nbsp;(59,&nbsp;16) &nbsp;&middot;&nbsp; R&nbsp;(123,&nbsp;13)</span>
+  </figcaption>
+</figure>
+<figure class="shot" id="img-icon">
+  <a href="media/icon.jpg"><img src="media/icon.jpg" alt="icon, colorized" loading="lazy"></a>
+  <figcaption>
+    <span class="figname">icon</span>
+    <span class="offs">G&nbsp;(41,&nbsp;17) &nbsp;&middot;&nbsp; R&nbsp;(89,&nbsp;23)</span>
+  </figcaption>
+</figure>
+<figure class="shot" id="img-ilemselga">
+  <a href="media/ilemselga.jpg"><img src="media/ilemselga.jpg" alt="ilemselga, colorized" loading="lazy"></a>
+  <figcaption>
+    <span class="figname">ilemselga</span>
+    <span class="offs">G&nbsp;(40,&nbsp;7) &nbsp;&middot;&nbsp; R&nbsp;(130,&nbsp;11)</span>
+  </figcaption>
+</figure>
+<figure class="shot" id="img-melons">
+  <a href="media/melons.jpg"><img src="media/melons.jpg" alt="melons, colorized" loading="lazy"></a>
+  <figcaption>
+    <span class="figname">melons</span>
+    <span class="offs">G&nbsp;(81,&nbsp;10) &nbsp;&middot;&nbsp; R&nbsp;(178,&nbsp;13)</span>
+  </figcaption>
+</figure>
+<figure class="shot" id="img-monastery">
+  <a href="media/monastery.jpg"><img src="media/monastery.jpg" alt="monastery, colorized" loading="lazy"></a>
+  <figcaption>
+    <span class="figname">monastery</span>
+    <span class="offs">G&nbsp;(&minus;3,&nbsp;2) &nbsp;&middot;&nbsp; R&nbsp;(3,&nbsp;2)</span>
+  </figcaption>
+</figure>
+<figure class="shot" id="img-religous_painting">
+  <a href="media/religous_painting.jpg"><img src="media/religous_painting.jpg" alt="religous_painting, colorized" loading="lazy"></a>
+  <figcaption>
+    <span class="figname">religous_painting</span>
+    <span class="offs">G&nbsp;(27,&nbsp;3) &nbsp;&middot;&nbsp; R&nbsp;(68,&nbsp;7)</span>
+  </figcaption>
+</figure>
+<figure class="shot" id="img-self_portrait">
+  <a href="media/self_portrait.jpg"><img src="media/self_portrait.jpg" alt="self_portrait, colorized" loading="lazy"></a>
+  <figcaption>
+    <span class="figname">self_portrait</span>
+    <span class="offs">G&nbsp;(78,&nbsp;29) &nbsp;&middot;&nbsp; R&nbsp;(176,&nbsp;37)</span>
+  </figcaption>
+</figure>
+<figure class="shot" id="img-siren">
+  <a href="media/siren.jpg"><img src="media/siren.jpg" alt="siren, colorized" loading="lazy"></a>
+  <figcaption>
+    <span class="figname">siren</span>
+    <span class="offs">G&nbsp;(49,&nbsp;&minus;6) &nbsp;&middot;&nbsp; R&nbsp;(95,&nbsp;&minus;25)</span>
+  </figcaption>
+</figure>
+<figure class="shot" id="img-three_generations">
+  <a href="media/three_generations.jpg"><img src="media/three_generations.jpg" alt="three_generations, colorized" loading="lazy"></a>
+  <figcaption>
+    <span class="figname">three_generations</span>
+    <span class="offs">G&nbsp;(53,&nbsp;14) &nbsp;&middot;&nbsp; R&nbsp;(112,&nbsp;11)</span>
+  </figcaption>
+</figure>
+<figure class="shot" id="img-tobolsk">
+  <a href="media/tobolsk.jpg"><img src="media/tobolsk.jpg" alt="tobolsk, colorized" loading="lazy"></a>
+  <figcaption>
+    <span class="figname">tobolsk</span>
+    <span class="offs">G&nbsp;(3,&nbsp;3) &nbsp;&middot;&nbsp; R&nbsp;(6,&nbsp;3)</span>
+  </figcaption>
+</figure>
+<figure class="shot" id="img-wharf">
+  <a href="media/wharf.jpg"><img src="media/wharf.jpg" alt="wharf, colorized" loading="lazy"></a>
+  <figcaption>
+    <span class="figname">wharf</span>
+    <span class="offs">G&nbsp;(15,&nbsp;&minus;7) &nbsp;&middot;&nbsp; R&nbsp;(82,&nbsp;&minus;16)</span>
+  </figcaption>
+</figure>
+</div>
+
+<h2 id="chosen">Chosen images</h2>
+<p class="lede">Three more plates from the Library of Congress archive, run through the same code.</p>
+<div class="tablewrap">
+<table>
+  <thead>
+    <tr><th>Image</th><th>Source</th><th>Green offset</th><th>Red offset</th><th>Channel size</th><th>Time</th></tr>
+  </thead>
+  <tbody>
+    <tr><td class="nm">example1</td><td class="src">example1.tif</td><td class="num">(8,&nbsp;8)</td><td class="num">(60,&nbsp;13)</td><td class="num dim">3771&times;3241</td><td class="num dim">1.4s</td></tr>
+    <tr><td class="nm">example2</td><td class="src">example2.tif</td><td class="num">(52,&nbsp;1)</td><td class="num">(113,&nbsp;&minus;24)</td><td class="num dim">3695&times;3208</td><td class="num dim">1.4s</td></tr>
+    <tr><td class="nm">example3</td><td class="src">example3.tif</td><td class="num">(28,&nbsp;24)</td><td class="num">(46,&nbsp;48)</td><td class="num dim">3713&times;3222</td><td class="num dim">1.4s</td></tr>
+  </tbody>
+</table>
+</div>
+<div class="gallery">
+<figure class="shot" id="img-example1">
+  <a href="media/example1.jpg"><img src="media/example1.jpg" alt="example1, colorized" loading="lazy"></a>
+  <figcaption>
+    <span class="figname">example1</span>
+    <span class="offs">G&nbsp;(8,&nbsp;8) &nbsp;&middot;&nbsp; R&nbsp;(60,&nbsp;13)</span>
+  </figcaption>
+</figure>
+<figure class="shot" id="img-example2">
+  <a href="media/example2.jpg"><img src="media/example2.jpg" alt="example2, colorized" loading="lazy"></a>
+  <figcaption>
+    <span class="figname">example2</span>
+    <span class="offs">G&nbsp;(52,&nbsp;1) &nbsp;&middot;&nbsp; R&nbsp;(113,&nbsp;&minus;24)</span>
+  </figcaption>
+</figure>
+<figure class="shot" id="img-example3">
+  <a href="media/example3.jpg"><img src="media/example3.jpg" alt="example3, colorized" loading="lazy"></a>
+  <figcaption>
+    <span class="figname">example3</span>
+    <span class="offs">G&nbsp;(28,&nbsp;24) &nbsp;&middot;&nbsp; R&nbsp;(46,&nbsp;48)</span>
+  </figcaption>
+</figure>
+</div>
+
+<h2 id="failure">Known issue</h2>
+<p><code>emir.tif</code> does not align: green lands correctly at (49,&nbsp;24) but red ends up at (17,&nbsp;&minus;825). Since the loss that I used (sum of squared differences) compares raw brightness, it wasn't able to pick up on Emir's robe as it is
+near-white on the blue plate and near-black on the red one. The actual correct alignment would then want a large squared difference whereas my algorithm is searching for the smallest squared differece.</p>
+
+<footer>
+  <p>CS 180, Fall 2026 &middot; Project 1 &middot; Amy Wang<br>
+  Source plates from the Library of Congress Prokudin-Gorskii collection.</p>
+</footer>
+
+</div>
+</body>
+</html>
