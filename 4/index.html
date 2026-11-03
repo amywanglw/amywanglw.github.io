@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Project 4 &middot; Image Warping and Mosaicing</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<div class="wrap">
+
+<nav class="crumbs">
+  <a href="../index.html">Home</a> <span>/</span>
+  <a href="../cs180/index.html">CS 180</a> <span>/</span>
+  <span class="here">Project 4</span>
+</nav>
+
+<header>
+  <p class="eyebrow">CS 180 &middot; Fall 2026 &middot; Project 4A</p>
+  <h1>Image Warping and Mosaicing</h1>
+  <p class="sub">Recovering homographies, warping and rectifying images, and blending photos into mosaics</p>
+  <p class="byline">Amy Wang</p>
+</header>
+
+<h2 id="overview">Overview</h2>
+<p>Two photos taken from the same spot but pointed in different directions are related by a projective transformation, or homography. In this project I shot sets of overlapping photos, clicked matching points between them, solved for the homography, and wrote my own inverse warping with nearest-neighbor and bilinear interpolation. I then used the warps to rectify flat objects and to stitch each set into a mosaic. The homography and warping code is my own; no <code>findHomography</code>, <code>warpPerspective</code> or <code>skimage.transform.warp</code>.</p>
+<p>All the work below is done on copies of the photos shrunk to 1200 pixels wide, so the warps run in well under a second.</p>
+
+<!-- ======================= A.1 ======================= -->
+
+<h2 id="a1">A.1 &middot; Shooting the pictures</h2>
+<p class="lede">Three sets of two photos, each pair taken from one spot by rotating the phone.</p>
+
+<h3>Gateway: a meeting room</h3>
+<div class="gallery two">
+<figure class="shot">
+  <a href="media/gateway1.jpg"><img src="media/gateway1.jpg" alt="meeting room with a whiteboard, a yellow felt panel and a round table" loading="lazy"></a>
+  <figcaption><span class="figname">gateway1</span></figcaption>
+</figure>
+<figure class="shot">
+  <a href="media/gateway2.jpg"><img src="media/gateway2.jpg" alt="same meeting room turned left, showing the TV and whiteboard" loading="lazy"></a>
+  <figcaption><span class="figname">gateway2</span></figcaption>
+</figure>
+</div>
+
+<h3>Soda: an atrium with a CD chandelier</h3>
+<div class="gallery two">
+<figure class="shot">
+  <a href="media/soda1.jpg"><img src="media/soda1.jpg" alt="atrium with a hanging chandelier made of CDs and a long interior window" loading="lazy"></a>
+  <figcaption><span class="figname">soda1</span></figcaption>
+</figure>
+<figure class="shot">
+  <a href="media/soda2.jpg"><img src="media/soda2.jpg" alt="same atrium turned left, showing the chandelier and the staircase" loading="lazy"></a>
+  <figcaption><span class="figname">soda2</span></figcaption>
+</figure>
+</div>
+
+<h3>Sofa: a living room</h3>
+<div class="gallery two">
+<figure class="shot">
+  <a href="media/sofa1.jpg"><img src="media/sofa1.jpg" alt="leather sofa with blue pillows, a fan and a side table" loading="lazy"></a>
+  <figcaption><span class="figname">sofa1</span></figcaption>
+</figure>
+<figure class="shot">
+  <a href="media/sofa2.jpg"><img src="media/sofa2.jpg" alt="same sofa from the left, with the windows and blinds behind it" loading="lazy"></a>
+  <figcaption><span class="figname">sofa2</span></figcaption>
+</figure>
+</div>
+
+<!-- ======================= A.2 ======================= -->
+
+<h2 id="a2">A.2 &middot; Recovering homographies</h2>
+<p class="lede">Solving for the 3&times;3 matrix H that maps points in image 1 to the matching points in image 2.</p>
+<p>A point (x, y) in image 1 maps to (x&prime;, y&prime;) in image 2 through H, with a divide at the end:</p>
+<pre><code>x' = (h1&middot;x + h2&middot;y + h3) / (h7&middot;x + h8&middot;y + 1)
+y' = (h4&middot;x + h5&middot;y + h6) / (h7&middot;x + h8&middot;y + 1)</code></pre>
+<p>The bottom-right entry of H is fixed at 1, which leaves 8 unknowns. Multiplying through by the denominator turns each pair of matching points into two equations that are linear in h:</p>
+<pre><code>[ x  y  1  0  0  0  -x&middot;x'  -y&middot;x' ] &middot; h = x'
+[ 0  0  0  x  y  1  -x&middot;y'  -y&middot;y' ] &middot; h = y'</code></pre>
+<p>Stacking these for n points gives a 2n &times; 8 system <code>Ah = b</code>. Four points would solve it exactly, but a few pixels of clicking error throw that solution off, so I clicked 10 points per pair and solved with least squares. For example, the first soda point, (521.9, 501.7) &rarr; (846.8, 536.3), contributes these two rows:</p>
+<pre><code>[ 521.9  501.7  1    0      0     0  -441932.5  -424824.8 ] &middot; h = 846.8
+[   0      0    0  521.9  501.7   1  -279875.2  -269040.9 ] &middot; h = 536.3</code></pre>
+<pre><code>def computeH(im1_pts, im2_pts):
+    A, b = [], []
+    for (x, y), (xp, yp) in zip(im1_pts, im2_pts):
+        A.append([x, y, 1, 0, 0, 0, -x * xp, -y * xp]); b.append(xp)
+        A.append([0, 0, 0, x, y, 1, -x * yp, -y * yp]); b.append(yp)
+    h, *_ = np.linalg.lstsq(np.array(A), np.array(b), rcond=None)
+    return np.append(h, 1).reshape(3, 3)</code></pre>
+
+<h3>Correspondences</h3>
+<p>I clicked the points with <code>plt.ginput</code> on the two images placed side by side, alternating left and right so each pair stays in order. I picked sharp corners that are easy to find in both photos, like the whiteboard corners, outlets, window frames and stair edges, and spread them across the overlap.</p>
+<div class="gallery">
+<figure class="shot">
+  <a href="media/gateway_points.jpg"><img src="media/gateway_points.jpg" alt="10 numbered correspondences on the two gateway photos" loading="lazy"></a>
+  <figcaption><span class="figname">Gateway</span></figcaption>
+</figure>
+<figure class="shot">
+  <a href="media/soda_points.jpg"><img src="media/soda_points.jpg" alt="10 numbered correspondences on the two soda photos" loading="lazy"></a>
+  <figcaption><span class="figname">Soda</span></figcaption>
+</figure>
+<figure class="shot">
+  <a href="media/sofa_points.jpg"><img src="media/sofa_points.jpg" alt="10 numbered correspondences on the two sofa photos" loading="lazy"></a>
+  <figcaption><span class="figname">Sofa</span></figcaption>
+</figure>
+</div>
+
+<h3>Recovered homographies</h3>
+<p style="margin-top:14px">Each H maps image 1 into image 2's frame. The error is the distance between where H sends each clicked point and where I clicked its match.</p>
+<pre><code>H_gateway = [[  0.7586     -0.01587    515.7 ]
+             [ -0.05285     0.8544      39.00 ]
+             [ -1.050e-04  -6.911e-05    1    ]]
+
+H_soda    = [[  0.6773     -0.04358    386.4 ]
+             [ -0.2020      0.8173     149.5 ]
+             [ -2.501e-04  -3.725e-05    1    ]]
+
+H_sofa    = [[  0.4002     -0.03259    562.0 ]
+             [ -0.3141      0.7102     151.9 ]
+             [ -3.877e-04  -1.091e-04    1    ]]</code></pre>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Set</th><th>Points</th><th>Mean error</th><th>Max error</th></tr></thead>
+  <tbody>
+    <tr><td class="nm">Gateway</td><td class="num">10</td><td class="num">16.45 px</td><td class="num">49.66 px</td></tr>
+    <tr><td class="nm">Soda</td><td class="num">10</td><td class="num">4.73 px</td><td class="num">8.83 px</td></tr>
+    <tr><td class="nm">Sofa</td><td class="num">10</td><td class="num">11.07 px</td><td class="num">32.23 px</td></tr>
+  </tbody>
+</table>
+</div>
+<p style="margin-top:14px">Soda fits best because its points sit on walls, windows and stairs that are all fairly far from the camera. The sofa points are all on the sofa, which is close to the camera, so a small shift of the phone between shots moves them more than a single homography can explain.</p>
+
+<!-- ======================= A.3 ======================= -->
+
+<h2 id="a3">A.3 &middot; Warping the images</h2>
+<p class="lede">Inverse warping with nearest-neighbor and bilinear interpolation, written from scratch.</p>
+<p>Pushing each input pixel forward through H leaves holes in the output, so I warp in reverse. I first send the input's four corners through H to find the output's bounding box. Then, for every output pixel, I apply H<sup>&minus;1</sup> to find where it came from in the input and sample the color there. That location almost always falls between pixels:</p>
+<ul>
+  <li><strong>Nearest neighbor</strong> rounds it to the closest pixel.</li>
+  <li><strong>Bilinear</strong> takes a weighted average of the four surrounding pixels, weighted by how close each one is.</li>
+</ul>
+<p>Output pixels whose source falls outside the input get marked in an alpha mask, which I use later for blending. Everything is vectorized with NumPy, so there are no Python loops over pixels.</p>
+<pre><code>def warpImageNearestNeighbor(im, H, bbox=None):
+    h, w = im.shape[:2]
+    sx, sy, shape, offset = output_grid(im, H, bbox)   # H^-1 applied to every output pixel
+    xr, yr = np.round(sx).astype(int), np.round(sy).astype(int)
+    valid = (xr >= 0) &amp; (xr &lt; w) &amp; (yr >= 0) &amp; (yr &lt; h)
+    out = np.zeros((len(sx), im.shape[2]))
+    out[valid] = im[yr[valid], xr[valid]]
+    return out.reshape(*shape, -1), valid.reshape(shape), offset</code></pre>
+<pre><code>def warpImageBilinear(im, H, bbox=None):
+    h, w = im.shape[:2]
+    sx, sy, shape, offset = output_grid(im, H, bbox)   # H^-1 applied to every output pixel
+    valid = (sx >= 0) &amp; (sx &lt;= w-1) &amp; (sy >= 0) &amp; (sy &lt;= h-1)
+    x, y = sx[valid], sy[valid]
+    x0, y0 = np.floor(x).astype(int), np.floor(y).astype(int)
+    x1, y1 = np.minimum(x0 + 1, w-1), np.minimum(y0 + 1, h-1)
+    dx, dy = (x - x0)[:, None], (y - y0)[:, None]
+    val = (im[y0, x0] * (1-dx) * (1-dy) + im[y0, x1] * dx * (1-dy)
+         + im[y1, x0] * (1-dx) * dy     + im[y1, x1] * dx * dy)
+    out = np.zeros((len(sx), im.shape[2]))
+    out[valid] = val
+    return out.reshape(*shape, -1), valid.reshape(shape), offset</code></pre>
+
+<h3>Rectification</h3>
+<p>To test the warp, I clicked the four corners of a flat rectangle seen at an angle (top-left, top-right, bottom-right, bottom-left), mapped them to the corners of an upright rectangle, and warped. I set the output box to just the rectangle; otherwise points near the horizon line map to huge coordinates and the output becomes enormous.</p>
+
+<div class="gallery two">
+<figure class="shot">
+  <a href="media/whiteboard_input.jpg"><img src="media/whiteboard_input.jpg" alt="gateway1 with the whiteboard corners outlined in red" loading="lazy"></a>
+  <figcaption><span class="figname">Whiteboard: input</span><span class="offs">corners clicked on gateway1</span></figcaption>
+</figure>
+<figure class="shot">
+  <a href="media/whiteboard_bilinear.jpg"><img src="media/whiteboard_bilinear.jpg" alt="rectified whiteboard, now seen straight on" loading="lazy"></a>
+  <figcaption><span class="figname">Whiteboard: rectified</span><span class="offs">600 &times; 750, bilinear</span></figcaption>
+</figure>
+</div>
+<p style="margin-top:14px">The whiteboard now looks straight-on: the seam between its two panels is vertical and the marker tray is level.</p>
+
+<div class="gallery two">
+<figure class="shot">
+  <a href="media/window_input.jpg"><img src="media/window_input.jpg" alt="soda1 with an interior window pane outlined in red" loading="lazy"></a>
+  <figcaption><span class="figname">Window: input</span><span class="offs">corners clicked on soda1</span></figcaption>
+</figure>
+<figure class="shot">
+  <a href="media/window_bilinear.jpg"><img src="media/window_bilinear.jpg" alt="rectified window pane" loading="lazy"></a>
+  <figcaption><span class="figname">Window: rectified</span><span class="offs">300 &times; 200, bilinear</span></figcaption>
+</figure>
+</div>
+<p style="margin-top:14px">The window frame comes out as a rectangle. The ceiling and room seen through the glass are still slanted, because they're behind the glass rather than in the same plane, and a homography only straightens the one plane it was fit to.</p>
+
+<h3>Nearest neighbor vs. bilinear</h3>
+<div class="gallery two">
+<figure class="shot">
+  <a href="media/window_nn.jpg"><img src="media/window_nn.jpg" alt="rectified window with nearest-neighbor interpolation" loading="lazy"></a>
+  <figcaption><span class="figname">Window: nearest neighbor</span></figcaption>
+</figure>
+<figure class="shot">
+  <a href="media/window_bilinear.jpg"><img src="media/window_bilinear.jpg" alt="rectified window with bilinear interpolation" loading="lazy"></a>
+  <figcaption><span class="figname">Window: bilinear</span></figcaption>
+</figure>
+<figure class="shot">
+  <a href="media/whiteboard_nn.jpg"><img src="media/whiteboard_nn.jpg" alt="rectified whiteboard with nearest-neighbor interpolation" loading="lazy"></a>
+  <figcaption><span class="figname">Whiteboard: nearest neighbor</span></figcaption>
+</figure>
+<figure class="shot">
+  <a href="media/whiteboard_bilinear.jpg"><img src="media/whiteboard_bilinear.jpg" alt="rectified whiteboard with bilinear interpolation" loading="lazy"></a>
+  <figcaption><span class="figname">Whiteboard: bilinear</span></figcaption>
+</figure>
+</div>
+<p style="margin-top:14px">Zoomed in, the difference is easier to see:</p>
+<div class="gallery">
+<figure class="shot">
+  <a href="media/window_zoom.jpg"><img src="media/window_zoom.jpg" alt="zoomed crop of the rectified window: nearest neighbor on the left is jagged, bilinear on the right is smooth" loading="lazy"></a>
+  <figcaption><span class="figname">Window, zoomed 5&times;</span><span class="offs">left: nearest neighbor / right: bilinear</span></figcaption>
+</figure>
+<figure class="shot">
+  <a href="media/whiteboard_zoom.jpg"><img src="media/whiteboard_zoom.jpg" alt="zoomed crop of the whiteboard tray: nearest neighbor on the left, bilinear on the right" loading="lazy"></a>
+  <figcaption><span class="figname">Whiteboard tray, zoomed 4&times;</span><span class="offs">left: nearest neighbor / right: bilinear</span></figcaption>
+</figure>
+</div>
+<div class="tablewrap" style="margin-top:22px">
+<table>
+  <thead><tr><th>Warp</th><th>Nearest neighbor</th><th>Bilinear</th></tr></thead>
+  <tbody>
+    <tr><td class="nm">Window rectification (300 &times; 200)</td><td class="num">0.003 s</td><td class="num">0.008 s</td></tr>
+    <tr><td class="nm">Whiteboard rectification (600 &times; 750)</td><td class="num">0.026 s</td><td class="num">0.068 s</td></tr>
+    <tr><td class="nm">Full warp, soda1 into soda2's frame</td><td class="num">0.21 s</td><td class="num">0.44 s</td></tr>
+  </tbody>
+</table>
+</div>
+<p style="margin-top:14px">Bilinear is about 2&ndash;2.5&times; slower, since it reads four pixels and does several multiplies for every output pixel where nearest neighbor reads one. The quality difference is clearest on the window, which is enlarged by the warp: nearest neighbor turns the diagonal edges and the light fixture into stair steps, while bilinear keeps them smooth at the cost of looking slightly softer.</p>
+
+<!-- ======================= A.4 ======================= -->
+
+<h2 id="a4">A.4 &middot; Blending the images into a mosaic</h2>
+<p class="lede">Warping image 1 into image 2's frame and blending the overlap so there's no visible seam.</p>
+<p>My procedure for each set:</p>
+<ol>
+  <li><strong>Register.</strong> I keep image 2 fixed and warp image 1 into its frame with <code>warpImageBilinear(im1, H)</code>. The warp returns the offset of its top-left corner, which I use to place both images on one canvas big enough to hold them.</li>
+  <li><strong>Feather.</strong> Each image gets a weight from a distance transform of its alpha mask, scaled so it's 1 at the image's center and falls to 0 at its edges. In the overlap, each pixel is the weighted average of the two images, so neither one cuts off abruptly.</li>
+  <li><strong>Two-band blend.</strong> Feathering alone blurs or doubles fine detail wherever the two photos don't line up perfectly. So I split each image into a low-frequency part (a Gaussian blur with &sigma; = 4) and a high-frequency part (the image minus the blur). The low frequencies get the feathered average, which smooths out brightness differences. For the high frequencies, I take whichever image has the larger weight at that pixel, which keeps edges sharp.</li>
+</ol>
+
+<h3>Gateway</h3>
+<div class="gallery">
+<figure class="shot">
+  <a href="media/gateway_mosaic.jpg"><img src="media/gateway_mosaic.jpg" alt="gateway mosaic showing the TV, whiteboard, yellow wall and round table" loading="lazy"></a>
+</figure>
+</div>
+<div class="pair">
+<figure class="shot">
+  <a href="media/gateway1.jpg"><img src="media/gateway1.jpg" alt="gateway1 source photo" loading="lazy"></a>
+  <figcaption><span class="offs">source: gateway1</span></figcaption>
+</figure>
+<figure class="shot">
+  <a href="media/gateway2.jpg"><img src="media/gateway2.jpg" alt="gateway2 source photo" loading="lazy"></a>
+  <figcaption><span class="offs">source: gateway2</span></figcaption>
+</figure>
+</div>
+
+<h3>Soda</h3>
+<div class="gallery">
+<figure class="shot">
+  <a href="media/soda_mosaic.jpg"><img src="media/soda_mosaic.jpg" alt="soda mosaic showing the CD chandelier, staircase and interior window" loading="lazy"></a>
+</figure>
+</div>
+<div class="pair">
+<figure class="shot">
+  <a href="media/soda1.jpg"><img src="media/soda1.jpg" alt="soda1 source photo" loading="lazy"></a>
+  <figcaption><span class="offs">source: soda1</span></figcaption>
+</figure>
+<figure class="shot">
+  <a href="media/soda2.jpg"><img src="media/soda2.jpg" alt="soda2 source photo" loading="lazy"></a>
+  <figcaption><span class="offs">source: soda2</span></figcaption>
+</figure>
+</div>
+
+<h3>Sofa</h3>
+<div class="gallery">
+<figure class="shot">
+  <a href="media/sofa_mosaic.jpg"><img src="media/sofa_mosaic.jpg" alt="sofa mosaic showing the leather sofa, windows, fan and side table" loading="lazy"></a>
+</figure>
+</div>
+<div class="pair">
+<figure class="shot">
+  <a href="media/sofa1.jpg"><img src="media/sofa1.jpg" alt="sofa1 source photo" loading="lazy"></a>
+  <figcaption><span class="offs">source: sofa1</span></figcaption>
+</figure>
+<figure class="shot">
+  <a href="media/sofa2.jpg"><img src="media/sofa2.jpg" alt="sofa2 source photo" loading="lazy"></a>
+  <figcaption><span class="offs">source: sofa2</span></figcaption>
+</figure>
+</div>
+
+<h3>Feathering alone vs. the two-band blend</h3>
+<div class="gallery">
+<figure class="shot">
+  <a href="media/sofa_seam_compare.jpg"><img src="media/sofa_seam_compare.jpg" alt="crop of the sofa overlap: feathered blend on the left, two-band blend on the right" loading="lazy"></a>
+  <figcaption><span class="figname">Sofa overlap</span><span class="offs">left: feathering only / right: two-band blend</span></figcaption>
+</figure>
+</div>
+<p style="margin-top:14px">In the overlap, the feathered version averages two slightly misaligned copies, so the corduroy on the pillows and the leather grain look soft and faintly doubled. The two-band blend keeps the detail from one image at a time and stays sharp, while the colors still transition smoothly.</p>
+
+<footer>
+  <p>CS 180, Fall 2026 &middot; Project 4A &middot; Amy Wang</p>
+</footer>
+
+</div>
+</body>
+</html>
