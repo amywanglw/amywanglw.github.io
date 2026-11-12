@@ -16,9 +16,9 @@
 </nav>
 
 <header>
-  <p class="eyebrow">CS 180 &middot; Fall 2026 &middot; Project 4A</p>
+  <p class="eyebrow">CS 180 &middot; Fall 2026 &middot; Project 4A &amp; 4B</p>
   <h1>Image Warping and Mosaicing</h1>
-  <p class="sub">Recovering homographies, warping and rectifying images, and blending photos into mosaics</p>
+  <p class="sub">Recovering homographies, warping and rectifying images, blending photos into mosaics, and finding correspondences automatically</p>
   <p class="byline">Amy Wang</p>
 </header>
 
@@ -302,8 +302,173 @@ H_sofa    = [[  0.4002     -0.03259    562.0 ]
 </div>
 <p style="margin-top:14px">In the overlap, the feathered version averages two slightly misaligned copies, so the corduroy on the pillows and the leather grain look soft and faintly doubled. The two-band blend keeps the detail from one image at a time and stays sharp, while the colors still transition smoothly.</p>
 
+<!-- ======================= PART B ======================= -->
+
+<h2 id="partb">Part B &middot; Feature matching for autostitching</h2>
+<p>In Part A I clicked the correspondences by hand. In Part B the computer finds them, following &ldquo;Multi-Image Matching using Multi-Scale Oriented Patches&rdquo; by Brown, Szeliski and Winder: detect corners, describe the patch around each one, match the descriptors between images, and fit the homography with RANSAC. I use the same 1200-pixel-wide photos as Part A, so the automatic points share coordinates with my hand-clicked ones.</p>
+
+<!-- ======================= B.1 ======================= -->
+
+<h2 id="b1">B.1 &middot; Harris corners and ANMS</h2>
+<p class="lede">Finding corners, then keeping a strong, evenly spread subset of them.</p>
+
+<h3>Harris corners</h3>
+<p>I run the single-scale Harris detector from the course's <code>harris.py</code> on the grayscale image. It computes a corner strength at every pixel and keeps each local maximum, throwing out anything within 20 pixels of the border so a full 40&times;40 descriptor window fits around every corner later.</p>
+<p>Taken as is, that keeps every tiny local bump, including camera noise on the blank walls: 53,330 corners on soda1 and 51,969 on soda2, enough to cover the whole image in red. So I also drop corners weaker than 1% of the image's strongest response, which leaves 5,533 and 6,978 real corners.</p>
+
+<h3>Adaptive non-maximal suppression</h3>
+<p>Matching only needs a few hundred corners, but simply keeping the strongest ones would put almost all of them on the CD chandelier, the most textured thing in the scene. ANMS keeps corners that are strong <em>and</em> spread out. For each corner I find its suppression radius: the distance to the nearest corner that is clearly stronger, meaning its own strength is less than 0.9 times that one's. A corner that is only beaten by far-away corners gets a large radius. I keep the 500 corners with the largest radii.</p>
+<p>Computing the radii takes the distance between every pair of corners, so I first keep only the 5,000 strongest corners to keep that matrix a manageable size. All of it is vectorized with no Python loops:</p>
+<pre><code>def anms(h, coords, n_ip=500, c_robust=0.9, max_candidates=5000):
+    ys, xs = coords
+    f = h[ys, xs]                                    # corner strengths
+    if len(f) &gt; max_candidates:                      # keep only the strongest
+        keep = np.argsort(-f)[:max_candidates]
+        ys, xs, f = ys[keep], xs[keep], f[keep]
+    pts = np.column_stack([xs, ys]).astype(float)
+    D = dist2(pts, pts)                              # pairwise squared distances
+    mask = f[:, None] &lt; c_robust * f[None, :]        # j is clearly stronger than i
+    radius = np.where(mask, D, np.inf).min(axis=1)   # nearest clearly-stronger corner
+    best = np.argsort(-radius)[:n_ip]
+    return np.vstack([ys[best], xs[best]])</code></pre>
+
+<div class="gallery">
+<figure class="shot">
+  <a href="media/soda1_b1.jpg"><img src="media/soda1_b1.jpg" alt="soda1 with 5,533 Harris corners on the left, crowded on the chandelier, and 500 ANMS corners on the right, spread over the scene" loading="lazy"></a>
+  <figcaption><span class="figname">soda1</span><span class="offs">left: Harris corners / right: after ANMS</span></figcaption>
+</figure>
+<figure class="shot">
+  <a href="media/soda2_b1.jpg"><img src="media/soda2_b1.jpg" alt="soda2 with Harris corners on the left and 500 ANMS corners on the right" loading="lazy"></a>
+  <figcaption><span class="figname">soda2</span><span class="offs">left: Harris corners / right: after ANMS</span></figcaption>
+</figure>
+</div>
+<p style="margin-top:14px">Without ANMS, the corners pile up on the chandelier, the stairs and the wire basket at the bottom. After ANMS, the 500 corners are much more even: the chandelier still gets its share, but so do the ceiling wires, the light fixtures, the interior window, the stair railing and the doorway. The plain white wall still has almost none, which is correct, since there's nothing on it that could be matched.</p>
+
+<!-- ======================= B.2 ======================= -->
+
+<h2 id="b2">B.2 &middot; Feature descriptors</h2>
+<p class="lede">Turning each corner into a small normalized patch that can be compared between images.</p>
+<pre><code>def extract_descriptors(gray, coords, window=40, size=8, sigma=2):
+    blurred = gaussian_filter(gray, sigma)
+    half, step = window // 2, window // size
+    descs = []
+    for y, x in coords.T:
+        patch = blurred[y-half:y+half:step, x-half:x+half:step]     # 8x8
+        patch = (patch - patch.mean()) / (patch.std() + 1e-8)       # bias/gain
+        descs.append(patch.ravel())
+    return np.array(descs)</code></pre>
+
+<div class="gallery">
+<figure class="shot">
+  <a href="media/soda1_b2_descriptors.jpg"><img src="media/soda1_b2_descriptors.jpg" alt="six corners boxed on soda1, each shown as a 40 by 40 color window, the same window blurred, and the final 8 by 8 normalized descriptor" loading="lazy"></a>
+  <figcaption><span class="figname">Six descriptors from soda1</span><span class="offs">rows: 40&times;40 window / blurred / 8&times;8 normalized descriptor</span></figcaption>
+</figure>
+</div>
+<p style="margin-top:14px">Each 8&times;8 descriptor is a coarse but recognizable copy of its window: the bright CD hole in #1, the diagonal edge in #2, the white chandelier hub against the dark skylight in #3, the light streak in the window in #4. Normalization stretches each patch to its full contrast range, which is why the faint edge in #2 comes out as dark as the high-contrast corner in #3. Every descriptor has mean 0 and standard deviation 1.</p>
+
+<!-- ======================= B.3 ======================= -->
+
+<h2 id="b3">B.3 &middot; Feature matching</h2>
+<p class="lede">Pairing up descriptors between the two images and throwing out the ambiguous pairs.</p>
+<p>For every descriptor in soda1, I find the closest descriptor in soda2 (its first nearest neighbor, 1-NN) and the second closest (2-NN), measured by Euclidean distance between the 64-number vectors. The closest one isn't automatically a good match: every descriptor has <em>some</em> nearest neighbor, even a corner that isn't visible in the other photo at all.</p>
+<p>So I use Lowe's ratio test. If a match is right, its 1-NN should be much closer than anything else, so the ratio <code>d<sub>1-NN</sub> / d<sub>2-NN</sub></code> is small. If the 1-NN and 2-NN are about equally close, the descriptor is ambiguous, which happens a lot on repeated texture like the CDs and the stair steps, and the match is likely wrong. Figure 6b of the paper shows this: correct matches have low ratios and incorrect ones pile up toward 1. Following it, I keep a match only if the ratio is below 0.6. I skip the paper's Section 6.</p>
+<pre><code>def match_features(desc1, desc2, ratio=0.6):
+    D = dist2(desc1, desc2)                           # squared distances, (N1, N2)
+    order = np.argsort(D, axis=1)
+    nn1, nn2 = order[:, 0], order[:, 1]               # 1-NN and 2-NN for each row
+    rows = np.arange(len(desc1))
+    d1, d2 = np.sqrt(D[rows, nn1]), np.sqrt(D[rows, nn2])
+    keep = d1 / d2 &lt; ratio                            # Lowe's ratio test
+    return np.column_stack([rows[keep], nn1[keep]])   # (i in image 1, j in image 2)</code></pre>
+
+<div class="gallery">
+<figure class="shot">
+  <a href="media/soda_b3_matches.jpg"><img src="media/soda_b3_matches.jpg" alt="soda1 and soda2 side by side with 175 colored lines joining matched corners" loading="lazy"></a>
+  <figcaption><span class="figname">Soda: 175 matches</span><span class="offs">ratio threshold 0.6; left: soda1 / right: soda2</span></figcaption>
+</figure>
+</div>
+<div class="tablewrap" style="margin-top:22px">
+<table>
+  <thead><tr><th>Ratio threshold</th><th class="num">0.4</th><th class="num">0.5</th><th class="num">0.6</th><th class="num">0.7</th><th class="num">0.8</th></tr></thead>
+  <tbody>
+    <tr><td class="nm">Matches kept (of 500)</td><td class="num">100</td><td class="num">144</td><td class="num">175</td><td class="num">207</td><td class="num">234</td></tr>
+  </tbody>
+</table>
+</div>
+<p style="margin-top:14px">Out of 500 corners, 175 pass the test. Almost every line joins the same physical spot in both photos: chandelier to chandelier, railing to railing, doorway to doorway. Since I only turned the camera between shots, the correct matches all run in nearly the same direction, which makes the few wrong ones easy to spot as lines at a different angle, mostly on the ceiling wires. A stricter threshold removes more of those but also loses good matches; the rest are left for RANSAC in B.4.</p>
+
+<!-- ======================= B.4 ======================= -->
+
+<h2 id="b4">B.4 &middot; RANSAC and automatic mosaics</h2>
+<p class="lede">Fitting the homography to the matches while ignoring the wrong ones, then stitching with my Part A code.</p>
+<pre><code>def ransac_H(pts1, pts2, n_iter=2000, eps=2.0, seed=0):
+    rng = np.random.default_rng(seed)
+    best = np.zeros(len(pts1), bool)
+    for _ in range(n_iter):
+        idx = rng.choice(len(pts1), 4, replace=False)       # 4 random matches
+        H = computeH(pts1[idx], pts2[idx])                   # exact fit
+        err = np.linalg.norm(apply_H(H, pts1) - pts2, axis=1)
+        inliers = err &lt; eps                                  # within 2 px
+        if inliers.sum() &gt; best.sum():
+            best = inliers
+    return computeH(pts1[best], pts2[best]), best            # refit on all inliers</code></pre>
+<p>The whole pipeline, Harris corners through ANMS, descriptors, matching (ratio 0.6) and RANSAC, runs on each pair with no clicking. The H it returns goes straight into my Part A <code>mosaic</code> function, which warps image 1 into image 2's frame with my bilinear warp and blends with the same two-band blend.</p>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Set</th><th class="num">Matches after ratio test</th><th class="num">RANSAC inliers</th></tr></thead>
+  <tbody>
+    <tr><td class="nm">Gateway</td><td class="num">27</td><td class="num">12</td></tr>
+    <tr><td class="nm">Soda</td><td class="num">175</td><td class="num">55</td></tr>
+    <tr><td class="nm">Sofa</td><td class="num">36</td><td class="num">13</td></tr>
+  </tbody>
+</table>
+</div>
+<p style="margin-top:14px">Soda has far more matches because the chandelier, stairs and railings give lots of distinctive corners, while the meeting room and living room are mostly blank walls. Fewer than half the matches survive in every set. Many of the rejected ones are on repeated texture like the CDs, where the ratio test can still pass a wrong match. Others are on objects at a different depth from the camera than the walls, which a single homography can only fit approximately within the 2-pixel tolerance.</p>
+
+<h3>Manual vs. automatic</h3>
+<p>Left: Part A, homography from 10 hand-clicked points. Right: Part B, homography from RANSAC.</p>
+
+<h3>Gateway</h3>
+<div class="pair">
+<figure class="shot">
+  <a href="media/gateway_mosaic.jpg"><img src="media/gateway_mosaic.jpg" alt="gateway mosaic stitched from hand-clicked points" loading="lazy"></a>
+  <figcaption><span class="figname">Manual</span><span class="offs">10 clicked points</span></figcaption>
+</figure>
+<figure class="shot">
+  <a href="media/gateway_auto_mosaic.jpg"><img src="media/gateway_auto_mosaic.jpg" alt="gateway mosaic stitched automatically with RANSAC" loading="lazy"></a>
+  <figcaption><span class="figname">Automatic</span><span class="offs">12 RANSAC inliers</span></figcaption>
+</figure>
+</div>
+
+<h3>Soda</h3>
+<div class="pair">
+<figure class="shot">
+  <a href="media/soda_mosaic.jpg"><img src="media/soda_mosaic.jpg" alt="soda mosaic stitched from hand-clicked points" loading="lazy"></a>
+  <figcaption><span class="figname">Manual</span><span class="offs">10 clicked points</span></figcaption>
+</figure>
+<figure class="shot">
+  <a href="media/soda_auto_mosaic.jpg"><img src="media/soda_auto_mosaic.jpg" alt="soda mosaic stitched automatically with RANSAC" loading="lazy"></a>
+  <figcaption><span class="figname">Automatic</span><span class="offs">55 RANSAC inliers</span></figcaption>
+</figure>
+</div>
+
+<h3>Sofa</h3>
+<div class="pair">
+<figure class="shot">
+  <a href="media/sofa_mosaic.jpg"><img src="media/sofa_mosaic.jpg" alt="sofa mosaic stitched from hand-clicked points" loading="lazy"></a>
+  <figcaption><span class="figname">Manual</span><span class="offs">10 clicked points</span></figcaption>
+</figure>
+<figure class="shot">
+  <a href="media/sofa_auto_mosaic.jpg"><img src="media/sofa_auto_mosaic.jpg" alt="sofa mosaic stitched automatically with RANSAC" loading="lazy"></a>
+  <figcaption><span class="figname">Automatic</span><span class="offs">13 RANSAC inliers</span></figcaption>
+</figure>
+</div>
+
+<p style="margin-top:14px">The image of soda hall stitches even without any clicking because the chandelier, stair railing, exit signs and the interior slanted window all line up with no doubling. With 55 inliers spread over the whole overlap, RANSAC has much more to work with than my 10 clicks. The sofa image also lines up well across the pillows, the blinds and the sofa back. The image of the gateway building is the weak one since it has only 12 inliers. The meeting room is mostly blank wall, so there just aren't many corners to match, and 11 of the 12 inliers sit in one narrow horizontal band across the middle of the photo. A homography fit to points in a band is pinned down well inside it but poorly above and below it, which is where the whiteboard's top edge is. My hand-clicked points were spread over the whole overlap, and the manual mosaic keeps the whiteboard seam as one line, though it has a small step at the whiteboard's top edge too.</p>
+
 <footer>
-  <p>CS 180, Fall 2026 &middot; Project 4A &middot; Amy Wang</p>
+  <p>CS 180, Fall 2026 &middot; Project 4A &amp; 4B &middot; Amy Wang</p>
 </footer>
 
 </div>
